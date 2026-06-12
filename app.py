@@ -163,6 +163,8 @@ st.title("📜 Template Unificado con CE")
 st.markdown('<p class="subtitulo">INTERLOG Comercio Exterior — Asignación de Certificados Mineros al Template Unificado</p>', unsafe_allow_html=True)
 st.markdown("---")
 
+nro_ref = st.text_input("Número de referencia de la operación", placeholder="ej: 982755")
+
 col1, col2 = st.columns([1, 1])
 with col1:
     st.markdown('<p class="seccion">📊 Template Unificado</p>', unsafe_allow_html=True)
@@ -173,10 +175,10 @@ with col2:
 
 st.markdown("---")
 
-if not (f_unificado and f_pdfs):
-    st.info("📝 Subí el Template Unificado y los PDFs de CE y RE para continuar.")
+if not (f_unificado and f_pdfs and nro_ref):
+    st.info("📝 Ingresá el número de referencia, el Template Unificado y los PDFs de CE y RE para continuar.")
 
-if st.button("🔍 ANALIZAR Y ASIGNAR CE", disabled=not (f_unificado and f_pdfs), use_container_width=True):
+if st.button("🔍 ANALIZAR Y ASIGNAR CE", disabled=not (f_unificado and f_pdfs and nro_ref), use_container_width=True):
     with st.spinner("Procesando..."):
         df = pd.read_excel(f_unificado, dtype=str)
         df.columns = df.columns.str.strip()
@@ -206,7 +208,8 @@ if st.button("🔍 ANALIZAR Y ASIGNAR CE", disabled=not (f_unificado and f_pdfs)
         st.session_state.update({
             'df_resultado': df_resultado, 'resultados': resultados,
             'alertas_dup': alertas_dup, 'fname_original': f_unificado.name,
-            'procesado': True
+            'procesado': True,
+            'nro_ref': nro_ref
         })
 
 if st.session_state.get('procesado'):
@@ -251,7 +254,7 @@ if st.session_state.get('procesado'):
     st.download_button(
         label="📥 DESCARGAR TEMPLATE UNIFICADO CON CE",
         data=exportar_excel(df),
-        file_name=fname.replace('.xlsx', '_CON_CE.xlsx'),
+        file_name=f'TEMPLATE_UNIFICADO_{st.session_state.get("nro_ref", "")}_CON_CE.xlsx',
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True
     )
