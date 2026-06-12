@@ -58,7 +58,10 @@ def extraer_datos_re(texto):
     fob = float(fob_str.replace('.', '').replace(',', '.'))
     codigos = re.findall(r'Código de parte[^:]*:\s*([A-Z0-9]+)', texto)
     codigos = [c for c in codigos if c.upper() not in ('NOPOSES', 'NO') and len(c) > 2]
-    return fob, codigos
+    # Extraer número de factura
+    factura_m = re.search(r'Número de Factura:\s*([A-Z0-9]+)', texto)
+    factura = factura_m.group(1).strip() if factura_m else None
+    return fob, codigos, factura
 
 def safe_float(v):
     try:
@@ -140,7 +143,11 @@ def asignar_ce(df, ce_info):
 
         # Filas disponibles con esos códigos
         mask_disp = mask_aplica & (df['NRO_CE'] == '')
-        candidatos = df[mask_disp & df['CodigoParte'].isin(codigos_ce)].copy()
+        mask_codigos = df['CodigoParte'].isin(codigos_ce)
+        # Filtrar por factura si está disponible
+        if info.get('factura'):
+            mask_codigos = mask_codigos & (df['NumeroDeFactura'] == info['factura'])
+        candidatos = df[mask_disp & mask_codigos].copy()
 
         if candidatos.empty:
             resultados.append({'ce': nro_ce, 're': info['re'], 'estado': 'sin_match',
@@ -194,14 +201,16 @@ if st.button("🔍 ANALIZAR Y ASIGNAR CE", disabled=not (f_unificado and f_pdfs 
                     ces[nro_ce] = nro_re
             elif 'RE-' in fname and 'DGDA' in fname:
                 nro_re = extraer_nro_re(fname)
-                fob, codigos = extraer_datos_re(texto)
+                fob, codigos, factura = extraer_datos_re(texto)
                 if nro_re:
-                    res[nro_re] = {'fob': fob, 'codigos': codigos}
+                    res[nro_re] = {'fob': fob, 'codigos': codigos, 'factura': factura}
 
         ce_info = {}
         for nro_ce, nro_re in ces.items():
             if nro_re in res:
-                ce_info[nro_ce] = {'re': nro_re, 'fob': res[nro_re]['fob'], 'codigos': res[nro_re]['codigos']}
+                ce_info[nro_ce] = {'re': nro_re, 'fob': res[nro_re]['fob'], 
+                                   'codigos': res[nro_re]['codigos'],
+                                   'factura': res[nro_re]['factura']}
 
         df_resultado, resultados, alertas_dup = asignar_ce(df, ce_info)
 
