@@ -6,8 +6,9 @@ import pdfplumber
 import re
 import io
 import math
+from itertools import combinations
 
-st.set_page_config(page_title="Asignador CE | INTERLOG", page_icon="📜", layout="wide")
+st.set_page_config(page_title="Template Unificado con CE | INTERLOG", page_icon="📜", layout="wide")
 
 st.markdown("""
 <style>
@@ -15,15 +16,18 @@ st.markdown("""
     html, body, [class*="css"] { font-family: 'Roboto', sans-serif; background-color: #0e1117; color: #fafafa; }
     .block-container { padding-top: 3rem; }
     h1 { color: #00b4d8 !important; font-size: 1.8rem !important; }
+    h2, h3 { color: #00b4d8 !important; }
     .subtitulo { font-size: 0.95rem; color: #8899aa; margin-bottom: 1.5rem; }
     .seccion { font-size: 1rem; font-weight: 600; color: #00b4d8; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 1rem; border-bottom: 1px solid #1e3a4a; padding-bottom: 6px; }
     .badge-ok { background: #0d2e1a; color: #3dd68c; padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: 500; border: 1px solid #3dd68c; display: inline-block; margin: 3px 2px; }
     .badge-err { background: #2e0d0d; color: #ff6b6b; padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: 500; border: 1px solid #ff6b6b; display: inline-block; margin: 3px 2px; }
     .badge-warn { background: #2e2200; color: #f0c040; padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: 500; border: 1px solid #f0c040; display: inline-block; margin: 3px 2px; }
-    .match-box { background: #161b22; border: 1px solid #1e3a4a; border-radius: 8px; padding: 14px; margin: 6px 0; font-size: 0.88rem; }
+    .match-box { background: #161b22; border: 1px solid #1e3a4a; border-radius: 8px; padding: 14px; margin: 6px 0; font-size: 0.92rem; color: #e0e0e0; }
     .match-ok { border-color: #3dd68c; }
     .match-warn { border-color: #f0c040; }
     .match-err { border-color: #ff6b6b; }
+    .match-box b { color: #ffffff; }
+    .match-box span { color: #aaaaaa; }
     .stButton > button { background: linear-gradient(135deg, #00b4d8, #0077b6) !important; color: white !important; font-weight: 600 !important; border: none !important; border-radius: 8px !important; }
     #MainMenu {visibility: hidden;} header {visibility: hidden;} footer {visibility: hidden;}
 </style>
@@ -89,64 +93,73 @@ def exportar_excel(df):
     buf = io.BytesIO(); wb.save(buf); buf.seek(0)
     return buf.getvalue()
 
+def encontrar_subconjunto_fob(candidatos_df, fob_objetivo, tolerancia=1.0):
+    """
+    Encuentra el subconjunto de filas cuya suma de FOB coincide con fob_objetivo.
+    Primero intenta con todas las filas. Si no coincide, prueba subconjuntos.
+    """
+    fobs = [safe_float(v) for v in candidatos_df['ValorTotalItem']]
+    indices = list(candidatos_df.index)
+    
+    # Caso 1: todas las filas coinciden
+    suma_total = round(sum(fobs), 2)
+    if abs(suma_total - fob_objetivo) <= tolerancia:
+        return indices, suma_total
+    
+    # Caso 2: buscar subconjunto por tamaño (de mayor a menor para ser eficiente)
+    # Solo intentar si hay menos de 40 filas (evitar explosión combinatoria)
+    if len(indices) <= 40:
+        for size in range(len(indices)-1, 0, -1):
+            for combo_idx in combinations(range(len(indices)), size):
+                suma = round(sum(fobs[i] for i in combo_idx), 2)
+                if abs(suma - fob_objetivo) <= tolerancia:
+                    return [indices[i] for i in combo_idx], suma
+    
+    # No encontró subconjunto exacto
+    return indices, suma_total
+
 def asignar_ce(df, ce_info):
-    """
-    Asigna CE a filas del unificado.
-    Lógica: para cada CE busca filas con los códigos de parte del RE
-    y verifica que la suma de FOB coincida con el FOB del RE.
-    """
     df = df.copy()
     if 'NRO_CE' not in df.columns:
         idx = df.columns.tolist().index('ITEM_DESPACHO') + 1
         df.insert(idx, 'NRO_CE', '')
-    
-    # Solo filas que aplican CM (sin SIN CM, sin CE ya asignado)
+
     mask_aplica = df['Observaciones'].isna() | (df['Observaciones'].str.strip() == '')
-    
-    resultados = []
-    alertas_duplicados = []
-    
-    # Detectar RE con mismos codigos Y mismo FOB (ambigüedad)
-    firma_re = {}  # firma -> lista de CEs
+
+    # Detectar CEs con mismos códigos y FOB (ambigüedad)
+    firma_re = {}
     for nro_ce, info in ce_info.items():
         firma = (frozenset(info['codigos']), round(info['fob'], 2))
         firma_re.setdefault(firma, []).append(nro_ce)
-    
-    for firma, ces_lista in firma_re.items():
-        if len(ces_lista) > 1:
-            alertas_duplicados.append({
-                'ces': ces_lista,
-                'codigos': list(firma[0]),
-                'fob': firma[1]
-            })
-    
+    alertas_dup = [{'ces': v, 'fob': k[1]} for k, v in firma_re.items() if len(v) > 1]
+
+    resultados = []
     for nro_ce, info in ce_info.items():
         codigos_ce = info['codigos']
         fob_ce = info['fob']
-        
-        # Filas disponibles (aplican CM y aún sin CE asignado)
+
+        # Filas disponibles con esos códigos
         mask_disp = mask_aplica & (df['NRO_CE'] == '')
         candidatos = df[mask_disp & df['CodigoParte'].isin(codigos_ce)].copy()
-        
+
         if candidatos.empty:
             resultados.append({'ce': nro_ce, 're': info['re'], 'estado': 'sin_match',
                                'fob_ce': fob_ce, 'fob_calc': 0, 'n_items': 0})
             continue
-        
-        # Verificar FOB
-        fob_calc = round(sum(safe_float(v) for v in candidatos['ValorTotalItem']), 2)
+
+        # Encontrar subconjunto cuya suma de FOB coincida
+        indices_match, fob_calc = encontrar_subconjunto_fob(candidatos, fob_ce)
         diff = abs(fob_calc - fob_ce)
         estado = 'ok' if diff <= 1 else 'warn'
-        
-        df.loc[candidatos.index, 'NRO_CE'] = nro_ce
-        
-        resultados.append({'ce': nro_ce, 're': info['re'], 'estado': estado,
-                           'fob_ce': fob_ce, 'fob_calc': fob_calc, 'n_items': len(candidatos)})
-    
-    return df, resultados, alertas_duplicados
 
-# ── UI ────────────────────────────────────────────────────────────────────────
-st.title("📜 Asignador CE")
+        df.loc[indices_match, 'NRO_CE'] = nro_ce
+        resultados.append({'ce': nro_ce, 're': info['re'], 'estado': estado,
+                           'fob_ce': fob_ce, 'fob_calc': fob_calc, 'n_items': len(indices_match)})
+
+    return df, resultados, alertas_dup
+
+# ── UI ─────────────────────────────────────────────────────────────────────────
+st.title("📜 Template Unificado con CE")
 st.markdown('<p class="subtitulo">INTERLOG Comercio Exterior — Asignación de Certificados Mineros al Template Unificado</p>', unsafe_allow_html=True)
 st.markdown("---")
 
@@ -167,7 +180,7 @@ if st.button("🔍 ANALIZAR Y ASIGNAR CE", disabled=not (f_unificado and f_pdfs)
     with st.spinner("Procesando..."):
         df = pd.read_excel(f_unificado, dtype=str)
         df.columns = df.columns.str.strip()
-        
+
         ces = {}; res = {}
         for f in f_pdfs:
             fname = f.name
@@ -182,20 +195,17 @@ if st.button("🔍 ANALIZAR Y ASIGNAR CE", disabled=not (f_unificado and f_pdfs)
                 fob, codigos = extraer_datos_re(texto)
                 if nro_re:
                     res[nro_re] = {'fob': fob, 'codigos': codigos}
-        
-        # Construir ce_info solo con CEs que tienen su RE
+
         ce_info = {}
         for nro_ce, nro_re in ces.items():
             if nro_re in res:
                 ce_info[nro_ce] = {'re': nro_re, 'fob': res[nro_re]['fob'], 'codigos': res[nro_re]['codigos']}
-        
+
         df_resultado, resultados, alertas_dup = asignar_ce(df, ce_info)
-        
+
         st.session_state.update({
-            'df_resultado': df_resultado,
-            'resultados': resultados,
-            'alertas_dup': alertas_dup,
-            'fname_original': f_unificado.name,
+            'df_resultado': df_resultado, 'resultados': resultados,
+            'alertas_dup': alertas_dup, 'fname_original': f_unificado.name,
             'procesado': True
         })
 
@@ -204,14 +214,12 @@ if st.session_state.get('procesado'):
     df = st.session_state['df_resultado']
     alertas_dup = st.session_state['alertas_dup']
     fname = st.session_state['fname_original']
-    
-    # Alertas de duplicados
+
     if alertas_dup:
-        st.markdown("### ⚠️ Alertas — CEs con mismos códigos y FOB")
+        st.markdown("### ⚠️ Alertas — CEs ambiguos")
         for a in alertas_dup:
-            ces_str = ' / '.join(a['ces'])
-            st.markdown(f'<span class="badge-warn">⚠️ CEs ambiguos: {ces_str} | FOB: {a["fob"]} | Códigos: {len(a["codigos"])}</span>', unsafe_allow_html=True)
-    
+            st.markdown(f'<span class="badge-warn">⚠️ CEs con mismos códigos y FOB: {" / ".join(a["ces"])} | FOB: {a["fob"]}</span>', unsafe_allow_html=True)
+
     st.markdown("### 📊 Resultado de la asignación")
     for r in resultados:
         if r['estado'] == 'ok':
@@ -220,28 +228,28 @@ if st.session_state.get('procesado'):
             css, badge = 'match-warn', '<span class="badge-warn">⚠️ Diferencia FOB</span>'
         else:
             css, badge = 'match-err', '<span class="badge-err">❌ Sin match en unificado</span>'
-        
+
         st.markdown(f"""
         <div class="match-box {css}">
             {badge} <b>{r['ce']}</b><br>
-            RE: {r['re']}<br>
-            Ítems asignados: {r['n_items']} | FOB RE: USD {r['fob_ce']} | FOB calculado: USD {r['fob_calc']}
+            <span>RE: {r['re']}</span><br>
+            <span>Ítems asignados: <b>{r['n_items']}</b> | FOB RE: <b>USD {r['fob_ce']}</b> | FOB calculado: <b>USD {r['fob_calc']}</b></span>
         </div>
         """, unsafe_allow_html=True)
-    
-    # Items sin CE
+
     sin_ce = df[(df['NRO_CE'] == '') & (df['Observaciones'].isna() | (df['Observaciones'].str.strip() == ''))]
+    total_sin_cm = (df['Observaciones'].str.strip() == 'SIN CM').sum() if 'Observaciones' in df.columns else 0
+    total_asignados = (df['NRO_CE'] != '').sum()
+
     if not sin_ce.empty:
         st.markdown(f'<br><span class="badge-warn">⚠️ {len(sin_ce)} ítems sin CE asignado</span>', unsafe_allow_html=True)
         st.dataframe(sin_ce[['NumeroDeFactura','CodigoParte','ValorTotalItem','ITEM_DESPACHO']].reset_index(drop=True))
-    
-    total_asignados = (df['NRO_CE'] != '').sum()
-    total_sin_cm = (df['Observaciones'].str.strip() == 'SIN CM').sum() if 'Observaciones' in df.columns else 0
-    st.markdown(f"**Total: {total_asignados} ítems con CE | {len(sin_ce)} sin CE | {total_sin_cm} SIN CM (esperado)**")
-    
+
+    st.markdown(f"**Total: {total_asignados} ítems con CE | {len(sin_ce)} sin CE | {total_sin_cm} SIN CM**")
     st.markdown("---")
+
     st.download_button(
-        label="📥 DESCARGAR UNIFICADO CON CE",
+        label="📥 DESCARGAR TEMPLATE UNIFICADO CON CE",
         data=exportar_excel(df),
         file_name=fname.replace('.xlsx', '_CON_CE.xlsx'),
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
