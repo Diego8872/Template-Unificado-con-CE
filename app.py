@@ -79,7 +79,7 @@ def exportar_excel(df):
     FD = Font(name='Calibri', size=11)
     SIN_COLOR = {'ID','InscRUMP','ActiServ','NroInsc','RazonSocial','CUIT','ImpDirecta','CondMerca',
                  'SimiSira','ProyectoMinero','Radicacion','ClasificacionDeArticulo','TipoDeFactura',
-                 'Observaciones','ITEM_DESPACHO','D:CERTSM','V:AUTOLIQCONTRIMP'}
+                 'Observaciones','ITEM_DESPACHO','ITEM','D:CERTSM','V:AUTOLIQCONTRIMP'}
     for ci, col in enumerate(df.columns, 1):
         cell = ws.cell(row=1, column=ci, value=col)
         cell.font = FH; cell.alignment = Alignment(horizontal='left', vertical='center')
@@ -123,8 +123,19 @@ def encontrar_subconjunto_fob(candidatos_df, fob_objetivo, tolerancia=1.0):
 
 def asignar_ce(df, ce_info):
     df = df.copy()
+    
+    # Detectar nombre de la columna de referencia al item del despacho
+    col_item = 'ITEM_DESPACHO' if 'ITEM_DESPACHO' in df.columns else (
+        'ITEM' if 'ITEM' in df.columns else df.columns[-1]
+    )
+    
+    # Renombrar siempre a ITEM en la salida
+    if col_item != 'ITEM':
+        df = df.rename(columns={col_item: 'ITEM'})
+        col_item = 'ITEM'
+    
     if 'D:CERTSM' not in df.columns:
-        idx = df.columns.tolist().index('ITEM_DESPACHO') + 1
+        idx = df.columns.tolist().index(col_item) + 1
         df.insert(idx, 'D:CERTSM', '')
 
     mask_aplica = df['Observaciones'].isna() | (df['Observaciones'].str.strip() == '')
