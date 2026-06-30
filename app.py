@@ -214,11 +214,13 @@ def preasignar_codigos_compartidos(df, ce_info):
     return df, avisos
 
 
-def encontrar_subconjunto_fob(candidatos_df, fob_objetivo, tolerancia=1.0):
+def encontrar_subconjunto_fob(candidatos_df, fob_objetivo, tolerancia=1.0, timeout_seg=5):
     """
     Encuentra el subconjunto de filas cuya suma de FOB coincide con fob_objetivo.
-    Primero intenta con todas las filas. Si no coincide, prueba subconjuntos.
+    Primero intenta con todas las filas. Si no coincide, prueba subconjuntos
+    con un límite de tiempo para evitar explosión combinatoria.
     """
+    import time
     fobs = [safe_float(v) for v in candidatos_df['ValorTotalItem']]
     indices = list(candidatos_df.index)
     
@@ -227,17 +229,23 @@ def encontrar_subconjunto_fob(candidatos_df, fob_objetivo, tolerancia=1.0):
     if abs(suma_total - fob_objetivo) <= tolerancia:
         return indices, suma_total
     
-    # Caso 2: buscar subconjunto por tamaño (de mayor a menor para ser eficiente)
-    # Solo intentar si hay menos de 40 filas (evitar explosión combinatoria)
+    # Caso 2: buscar subconjunto por tamaño (de mayor a menor)
+    # Con límite de tiempo para no colgar la app con muchos CEs/ítems
+    deadline = time.time() + timeout_seg
     if len(indices) <= 40:
         for size in range(len(indices)-1, 0, -1):
+            if time.time() > deadline:
+                break
             for combo_idx in combinations(range(len(indices)), size):
+                if time.time() > deadline:
+                    break
                 suma = round(sum(fobs[i] for i in combo_idx), 2)
                 if abs(suma - fob_objetivo) <= tolerancia:
                     return [indices[i] for i in combo_idx], suma
     
-    # No encontró subconjunto exacto
+    # No encontró subconjunto exacto (o se agotó el tiempo)
     return indices, suma_total
+
 
 def asignar_ce(df, ce_info):
     df = df.copy()
@@ -272,45 +280,71 @@ def asignar_ce(df, ce_info):
 
     resultados = []
     for nro_ce, info in ce_info.items():
-        codigos_ce = info['codigos']
         fob_ce = info['fob']
 
-        # Filas disponibles con esos códigos (las que ya quedaron asignadas en el
-        # PASO 1 ya no están "disponibles" por el filtro de D:CERTSM == '')
-        mask_disp = mask_aplica & (df['D:CERTSM'] == '')
-        mask_codigos = df['CodigoParte'].isin(codigos_ce)
-        # Filtrar por factura si está disponible
+        ya_asignadas_idx = list(df[df['D:CERTSM'] == nro_ce].index)
+        fob_acumulado = sum(safe_float(df.at[i, 'ValorTotalItem']) for i in ya_asignadas_idx)
+
+        mask_disp = mask_aplica & (df['D:CERTSM'] == '') & (df['CodigoParte'].isin(info['codigos']))
         if info.get('factura'):
-            mask_codigos = mask_codigos & (df['NumeroDeFactura'] == info['factura'])
-        candidatos = df[mask_disp & mask_codigos].copy()
+            mask_disp = mask_disp & (df['NumeroDeFactura'] == info['factura'])
+        pool = df[mask_disp].copy()
+        pool['_cant'] = pool['Cantidad'].apply(safe_float) if 'Cantidad' in pool.columns else 1.0
+        pool['_fob'] = pool['ValorTotalItem'].apply(safe_float)
 
-        # Líneas que este CE ya tiene asignadas desde el PASO 1 (códigos compartidos)
-        ya_asignadas = df[(df['D:CERTSM'] == nro_ce)]
-        fob_ya_asignado = sum(safe_float(v) for v in ya_asignadas['ValorTotalItem']) if not ya_asignadas.empty else 0.0
-        fob_restante = round(fob_ce - fob_ya_asignado, 2)
+        # PASO 2: matching renglón-a-línea para los renglones de este CE que no
+        # fueron resueltos en el PASO 1 (códigos no compartidos, la gran mayoría).
+        renglones_pendientes = []
+        for rg in info.get('renglones', []):
+            ya = (
+                (df['D:CERTSM'] == nro_ce) &
+                (df['CodigoParte'] == rg['codigo']) &
+                (df['Cantidad'].apply(safe_float).sub(rg['cantidad']).abs() < 0.001) &
+                (df['ValorTotalItem'].apply(safe_float).sub(rg['fob']).abs() <= 1)
+            ).any()
+            if ya:
+                continue
 
-        if candidatos.empty:
-            if not ya_asignadas.empty:
-                # Todo lo que le correspondía ya se resolvió por reparto de cantidad
-                diff = abs(fob_ya_asignado - fob_ce)
-                estado = 'ok' if diff <= 1 else 'warn'
-                resultados.append({'ce': nro_ce, 're': info['re'], 'estado': estado,
-                                   'fob_ce': fob_ce, 'fob_calc': fob_ya_asignado, 'n_items': len(ya_asignadas)})
+            candidatos_idx = list(
+                pool[(pool['CodigoParte'] == rg['codigo']) &
+                     (pool['_cant'].sub(rg['cantidad']).abs() < 0.001) &
+                     (pool['_fob'].sub(rg['fob']).abs() <= 1)].index
+            )
+
+            if len(candidatos_idx) == 1:
+                idx = candidatos_idx[0]
+                df.loc[idx, 'D:CERTSM'] = nro_ce
+                ya_asignadas_idx.append(idx)
+                fob_acumulado = round(fob_acumulado + safe_float(df.at[idx, 'ValorTotalItem']), 2)
+                pool = pool.drop(index=idx)
             else:
-                resultados.append({'ce': nro_ce, 're': info['re'], 'estado': 'sin_match',
-                                   'fob_ce': fob_ce, 'fob_calc': 0, 'n_items': 0})
-            continue
+                renglones_pendientes.append((rg, candidatos_idx))
 
-        # Encontrar subconjunto cuya suma de FOB coincida con lo que falta cubrir
-        indices_match, fob_calc_parcial = encontrar_subconjunto_fob(candidatos, fob_restante)
-        fob_calc = round(fob_ya_asignado + fob_calc_parcial, 2)
+        # PASO 3: combinatoria solo sobre renglones con ambigüedad real (líneas idénticas).
+        # El pool es pequeño, sin explosión combinatoria.
+        for rg, candidatos_idx in renglones_pendientes:
+            if not candidatos_idx:
+                avisos_reparto.append(
+                    f"⚠️ {nro_ce}: no se encontró línea en el Excel para "
+                    f"código {rg['codigo']} (cant {rg['cantidad']}, FOB {rg['fob']})"
+                )
+                continue
+            for idx in candidatos_idx:
+                if idx in pool.index:
+                    df.loc[idx, 'D:CERTSM'] = nro_ce
+                    ya_asignadas_idx.append(idx)
+                    fob_acumulado = round(fob_acumulado + safe_float(df.at[idx, 'ValorTotalItem']), 2)
+                    pool = pool.drop(index=idx)
+                    break
+
+        fob_calc = round(fob_acumulado, 2)
         diff = abs(fob_calc - fob_ce)
-        estado = 'ok' if diff <= 1 else 'warn'
-
-        df.loc[indices_match, 'D:CERTSM'] = nro_ce
-        n_items_total = len(indices_match) + len(ya_asignadas)
+        if not ya_asignadas_idx:
+            estado = 'sin_match'
+        else:
+            estado = 'ok' if diff <= 1 else 'warn'
         resultados.append({'ce': nro_ce, 're': info['re'], 'estado': estado,
-                           'fob_ce': fob_ce, 'fob_calc': fob_calc, 'n_items': n_items_total})
+                           'fob_ce': fob_ce, 'fob_calc': fob_calc, 'n_items': len(ya_asignadas_idx)})
 
     # Agregar columna V:AUTOLIQCONTRIMP — SI si tiene CE asignado, vacío si no
     if 'V:AUTOLIQCONTRIMP' not in df.columns:
