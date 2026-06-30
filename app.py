@@ -174,41 +174,31 @@ def preasignar_codigos_compartidos(df, ce_info):
         pool = {i: (candidatas.at[i, '_cant'], candidatas.at[i, '_fob']) for i in candidatas.index}
 
         # Armar la lista de renglones que cada CE declaró para este código puntual
-        # (cada renglón = una unidad de matching, con su propia cantidad y FOB)
         renglones_por_ce = {}
         for nro_ce in ces_que_compiten:
             renglones_por_ce[nro_ce] = [
                 r for r in ce_info[nro_ce].get('renglones', []) if r['codigo'] == cod
             ]
 
-        # PASO A: match exacto renglón-a-línea por (cantidad, fob) — el caso ideal,
-        # sin ambigüedad, porque cada renglón declarado coincide 1:1 con una línea física.
+        # Para cada renglón declarado por cada CE, buscar candidatas en el pool
+        # con (cantidad, FOB) coincidentes y asignar la primera disponible.
+        # Si hay múltiples candidatas idénticas → tomar la primera (son
+        # intercambiables) y sacarla del pool. Determinista y correcto.
         for nro_ce, renglones in renglones_por_ce.items():
             for rg in renglones:
                 candidatos_idx = [
                     i for i, (c, f) in pool.items()
                     if abs(c - rg['cantidad']) < 0.001 and abs(f - rg['fob']) <= 1
                 ]
-                if len(candidatos_idx) == 1:
+                if candidatos_idx:
                     idx = candidatos_idx[0]
                     df.loc[idx, 'D:CERTSM'] = nro_ce
                     del pool[idx]
-
-        # PASO B: lo que no pudo resolverse 1:1 sin ambigüedad por (cantidad, fob)
-        # exacta, se reporta como aviso en vez de adivinar — más vale dejarlo para
-        # revisión manual que asignar mal.
-        for nro_ce, renglones in renglones_por_ce.items():
-            for rg in renglones:
-                ya_asignado = (
-                    (df['D:CERTSM'] == nro_ce) &
-                    (df['CodigoParte'] == cod) &
-                    (df['Cantidad'].apply(safe_float).sub(rg['cantidad']).abs() < 0.001) &
-                    (df['ValorTotalItem'].apply(safe_float).sub(rg['fob']).abs() <= 1)
-                ).any()
-                if not ya_asignado:
+                else:
                     avisos.append(
-                        f"⚠️ Código {cod}: no se encontró línea única en el Excel para "
-                        f"{nro_ce} (cantidad {rg['cantidad']}, FOB {rg['fob']}). Revisar manualmente."
+                        f"⚠️ Código {cod}: no hay línea disponible en el Excel para "
+                        f"{nro_ce} (cantidad {rg['cantidad']}, FOB {rg['fob']}). "
+                        f"Verificar que el Template tenga esa línea."
                     )
 
     return df, avisos
