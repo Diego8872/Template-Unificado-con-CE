@@ -33,6 +33,11 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+def norm_codigo(cod):
+    """Normaliza un código de parte eliminando ceros a la izquierda para comparación.
+    Funciona tanto para numéricos (0951519 → 951519) como alfanuméricos (6G7803 → 6G7803)."""
+    return str(cod).strip().lstrip('0') if cod else ''
+
 def extraer_nro_ce(filename):
     m = re.search(r'(CE-\d{4}-\d+-APN-DIMI)', filename)
     return m.group(1) + '#MEC' if m else None
@@ -78,8 +83,8 @@ def extraer_datos_re(texto):
     codigos = []
     cantidad_por_codigo = {}
     for cant_str, fob_renglon_str, cod in renglones_raw:
-        cod = cod.strip()
-        if cod.upper() in ('NOPOSES', 'NO') or len(cod) <= 2:
+        cod = norm_codigo(cod)
+        if not cod or cod.upper() in ('NOPOSES', 'NO') or len(cod) <= 1:
             continue
         cant = safe_float(cant_str)
         fob_renglon = safe_float(fob_renglon_str)
@@ -368,6 +373,8 @@ if st.button("🔍 ANALIZAR Y ASIGNAR CE", disabled=not (f_unificado and f_pdfs 
     with st.spinner("Procesando..."):
         df = pd.read_excel(f_unificado, dtype=str)
         df.columns = df.columns.str.strip()
+        if 'CodigoParte' in df.columns:
+            df['CodigoParte'] = df['CodigoParte'].apply(norm_codigo)
 
         ces = {}; res = {}
         for f in f_pdfs:
