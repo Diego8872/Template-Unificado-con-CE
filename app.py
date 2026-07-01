@@ -452,7 +452,7 @@ if st.session_state.get('procesado'):
 
     if not sin_ce.empty:
         st.markdown(f'<br><span class="badge-warn">⚠️ {len(sin_ce)} ítems sin CE asignado</span>', unsafe_allow_html=True)
-        st.dataframe(sin_ce[['NumeroDeFactura','CodigoParte','ValorTotalItem','ITEM_DESPACHO']].reset_index(drop=True))
+        st.dataframe(sin_ce[['NumeroDeFactura','CodigoParte','ValorTotalItem','ITEM']].reset_index(drop=True))
 
     st.markdown(f"**Total: {total_asignados} ítems con CE | {len(sin_ce)} sin CE | {total_sin_cm} SIN CM**")
     st.markdown("---")
