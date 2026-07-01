@@ -38,9 +38,37 @@ def norm_codigo(cod):
     Funciona tanto para numéricos (0951519 → 951519) como alfanuméricos (6G7803 → 6G7803)."""
     return str(cod).strip().lstrip('0') if cod else ''
 
-def extraer_nro_ce(filename):
-    m = re.search(r'(CE-\d{4}-\d+-APN-DIMI)', filename)
-    return m.group(1) + '#MEC' if m else None
+def extraer_nro_ce_desde_pdf(file):
+    """Lee el número oficial del CE desde las anotaciones del PDF (campo 'numero_documento').
+    El número aparece como widget de formulario, no como texto plano."""
+    try:
+        with pdfplumber.open(file) as pdf:
+            for page in pdf.pages:
+                for annot in (page.annots or []):
+                    data = annot.get('data', {})
+                    titulo = data.get('T', b'')
+                    if isinstance(titulo, bytes):
+                        titulo = titulo.decode('latin-1', errors='ignore')
+                    if 'numero_documento' in titulo.lower():
+                        valor = data.get('V', b'')
+                        if isinstance(valor, bytes):
+                            valor = valor.decode('latin-1', errors='ignore')
+                        if valor and valor.startswith('CE-'):
+                            return valor.strip()
+    except Exception:
+        pass
+    return None
+
+def extraer_nro_ce_desde_nombre(filename):
+    """Extrae el número del CE desde el nombre del archivo, aceptando cualquier
+    variante después de APN- (DIMI, DNIM, etc.)."""
+    m = re.search(r'(CE-\d{4}-\d+-APN-\w+?)(?:_|\b)', filename)
+    if not m:
+        return None
+    nro = m.group(1)
+    if not nro.endswith('#MEC'):
+        nro = nro + '#MEC'
+    return nro
 
 def extraer_nro_re(filename):
     m = re.search(r'(RE-\d{4}-\d+-APN-DGDA)', filename)
@@ -52,6 +80,32 @@ def extraer_texto_pdf(file):
         for page in pdf.pages:
             texto += (page.extract_text() or '') + ' '
     return texto
+
+def extraer_texto_y_nro_ce(file):
+    """Abre el PDF una sola vez y extrae el texto completo y el número del CE
+    desde las anotaciones (campo 'numero_documento'). Evita el problema de
+    cursor agotado cuando se lee el archivo dos veces."""
+    texto = ''
+    nro_ce = None
+    try:
+        with pdfplumber.open(file) as pdf:
+            for page in pdf.pages:
+                texto += (page.extract_text() or '') + ' '
+                if nro_ce is None:
+                    for annot in (page.annots or []):
+                        data = annot.get('data', {})
+                        titulo = data.get('T', b'')
+                        if isinstance(titulo, bytes):
+                            titulo = titulo.decode('latin-1', errors='ignore')
+                        if 'numero_documento' in titulo.lower():
+                            valor = data.get('V', b'')
+                            if isinstance(valor, bytes):
+                                valor = valor.decode('latin-1', errors='ignore')
+                            if valor and valor.startswith('CE-'):
+                                nro_ce = valor.strip()
+    except Exception:
+        pass
+    return texto, nro_ce
 
 def extraer_re_de_ce(texto):
     m = re.search(r'RE-\d{4}-\d+-APN-[\s\n]*DGDA#MEC', texto)
@@ -379,13 +433,14 @@ if st.button("🔍 ANALIZAR Y ASIGNAR CE", disabled=not (f_unificado and f_pdfs 
         ces = {}; res = {}
         for f in f_pdfs:
             fname = f.name
-            texto = extraer_texto_pdf(f)
-            if 'CE-' in fname and 'DIMI' in fname:
-                nro_ce = extraer_nro_ce(fname)
+            if 'CE-' in fname:
+                texto, nro_ce = extraer_texto_y_nro_ce(f)
+                nro_ce = nro_ce or extraer_nro_ce_desde_nombre(fname)
                 nro_re = extraer_re_de_ce(texto)
                 if nro_ce and nro_re:
                     ces[nro_ce] = nro_re
-            elif 'RE-' in fname and 'DGDA' in fname:
+            else:
+                texto = extraer_texto_pdf(f)
                 nro_re = extraer_nro_re(fname)
                 fob, codigos, factura, cantidad_por_codigo, renglones = extraer_datos_re(texto)
                 if nro_re:
