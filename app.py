@@ -209,15 +209,22 @@ def preasignar_codigos_compartidos(df, ce_info):
                 r for r in ce_info[nro_ce].get('renglones', []) if r['codigo'] == cod
             ]
 
-        # FIX: filtrar candidatas por la factura del CE específico en el loop interno
+        # FIX 1: filtrar por factura del CE específico
+        # FIX 2: filtrar por ValorFOBTotal de la línea ≈ FOB del CE (discrimina líneas idénticas)
         for nro_ce, renglones in renglones_por_ce.items():
             factura_ce = ce_info[nro_ce].get('factura')
+            fob_ce = ce_info[nro_ce]['fob']
             for rg in renglones:
                 candidatos_idx = [
                     i for i, (c, f) in pool.items()
                     if abs(c - rg['cantidad']) < 0.001
                     and abs(f - rg['fob']) <= 1
                     and (not factura_ce or df.at[i, 'NumeroDeFactura'] == factura_ce)
+                    and (
+                        'ValorFOBTotal' not in df.columns
+                        or pd.isna(df.at[i, 'ValorFOBTotal'])
+                        or abs(safe_float(df.at[i, 'ValorFOBTotal']) - fob_ce) <= 1
+                    )
                 ]
                 if candidatos_idx:
                     idx = candidatos_idx[0]
@@ -329,11 +336,18 @@ def asignar_ce(df, ce_info):
             if ya:
                 continue
 
-            candidatos_idx = list(
-                pool[(pool['CodigoParte'] == rg['codigo']) &
-                     (pool['_cant'].sub(rg['cantidad']).abs() < 0.001) &
-                     (pool['_fob'].sub(rg['fob']).abs() <= 1)].index
+            mask_cand = (
+                (pool['CodigoParte'] == rg['codigo']) &
+                (pool['_cant'].sub(rg['cantidad']).abs() < 0.001) &
+                (pool['_fob'].sub(rg['fob']).abs() <= 1)
             )
+            if 'ValorFOBTotal' in pool.columns:
+                mask_fob_total = (
+                    pool['ValorFOBTotal'].isna() |
+                    pool['ValorFOBTotal'].apply(safe_float).sub(fob_ce).abs().le(1)
+                )
+                mask_cand = mask_cand & mask_fob_total
+            candidatos_idx = list(pool[mask_cand].index)
 
             if len(candidatos_idx) == 1:
                 idx = candidatos_idx[0]
