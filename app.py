@@ -260,6 +260,29 @@ def preasignar_codigos_compartidos(df, ce_info):
                         f"Verificar que el Template tenga esa línea."
                     )
 
+    # PASO DE VALIDACIÓN: si la pre-asignación le robó líneas a un CE y ese CE
+    # ya no puede cerrar su FOB con lo que queda disponible, revertir sus
+    # pre-asignaciones y dejar que el matching global por FOB lo resuelva.
+    for nro_ce, info in ce_info.items():
+        fob_ce = info['fob']
+        factura = info.get('factura')
+        idx_preasignados = df[df['D:CERTSM'] == nro_ce].index.tolist()
+        fob_preasignado = round(sum(safe_float(df.at[i, 'ValorTotalItem']) for i in idx_preasignados), 2)
+        if abs(fob_preasignado - fob_ce) <= 1:
+            continue
+        mask_disp = mask_aplica & (df['D:CERTSM'] == '') & (df['CodigoParte'].isin(info['codigos']))
+        if factura:
+            mask_disp = mask_disp & (df['NumeroDeFactura'] == factura)
+        fob_disponible = round(sum(safe_float(v) for v in df[mask_disp]['ValorTotalItem']), 2)
+        fob_total_posible = round(fob_preasignado + fob_disponible, 2)
+        if abs(fob_total_posible - fob_ce) > 1:
+            df.loc[idx_preasignados, 'D:CERTSM'] = ''
+            avisos.append(
+                f"ℹ️ Pre-asignación revertida para {nro_ce} "
+                f"(FOB posible {fob_total_posible} ≠ FOB declarado {fob_ce}). "
+                f"Se resolverá por matching global de FOB."
+            )
+
     return df, avisos
 
 
