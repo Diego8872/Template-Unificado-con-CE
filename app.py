@@ -99,8 +99,11 @@ def extraer_texto_y_nro_ce(file):
     return texto, nro_ce
 
 def extraer_re_de_ce(texto):
-    m = re.search(r'RE-\d{4}-\d+-APN-[\s\n]*DGDA#MEC', texto)
-    return m.group(0).replace('\n', '').replace(' ', '') if m else None
+    # [^\w\s]* acepta cualquier carácter especial entre # y MEC (ej: punto medio ·)
+    m = re.search(r'(RE-\d{4}-\d+-APN-[\s\n]*DGDA)#[^\w\s]*MEC', texto)
+    if m:
+        return m.group(1).replace('\n', '').replace(' ', '') + '#MEC'
+    return None
 
 def extraer_datos_re(texto):
     fob_m = re.search(r'Valor FOB TOTAL[^\d]*([\d,\.]+)', texto)
