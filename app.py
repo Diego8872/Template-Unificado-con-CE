@@ -151,7 +151,7 @@ def exportar_excel(df):
     FD = Font(name='Calibri', size=11)
     SIN_COLOR = {'ID','InscRUMP','ActiServ','NroInsc','RazonSocial','CUIT','ImpDirecta','CondMerca',
                  'SimiSira','ProyectoMinero','Radicacion','ClasificacionDeArticulo','TipoDeFactura',
-                 'Observaciones','ITEM_DESPACHO','ITEM','D:CERTSM','V:AUTOLIQCONTRIMP'}
+                 'Observaciones','ITEM_DESPACHO','ITEM','D:CERTSM','V:MINERIA','I:MINERIAOPC'}
     for ci, col in enumerate(df.columns, 1):
         cell = ws.cell(row=1, column=ci, value=col)
         cell.font = FH; cell.alignment = Alignment(horizontal='left', vertical='center')
@@ -168,18 +168,21 @@ def exportar_excel(df):
     buf = io.BytesIO(); wb.save(buf); buf.seek(0)
     return buf.getvalue()
 
-def preasignar_codigos_compartidos(df, ce_info):
-    """
-    Resuelve códigos de parte que compiten entre varios CEs, a nivel de
-    renglón individual (cantidad + FOB del renglón).
+@st.cache_data
+def cargar_ncm_mineria():
+    """Carga el listado NCM del Anexo II Res. 73/26 SM → dict {ncm_10chars: MIN001/MIN002}.
+    El archivo ncm_mineria.xlsx debe estar en el mismo directorio que app.py."""
+    try:
+        df_ncm = pd.read_excel('ncm_mineria.xlsx', dtype=str)
+        return {str(row['NCM']).strip()[:10]: str(row['A DECLARAR EN SIM']).strip()
+                for _, row in df_ncm.iterrows()
+                if pd.notna(row['NCM']) and pd.notna(row['A DECLARAR EN SIM'])}
+    except Exception:
+        return {}
 
-    FIX: al buscar candidatas para cada renglón, filtra por la factura del
-    CE específico — no la unión de facturas de todos los competidores.
-    Esto evita que un CE de factura X le robe una línea de factura Y a otro CE.
-    """
+def preasignar_codigos_compartidos(df, ce_info):
     avisos = []
 
-    # 1) Detectar qué códigos aparecen en más de un CE
     codigo_a_ces = {}
     for nro_ce, info in ce_info.items():
         for cod in set(info['codigos']):
@@ -194,8 +197,6 @@ def preasignar_codigos_compartidos(df, ce_info):
     for cod in codigos_compartidos:
         ces_que_compiten = codigo_a_ces[cod]
 
-        # Pool de líneas del Excel disponibles para este código (sin filtro de factura,
-        # porque cada CE filtrará por la suya propia en el loop interno)
         mask_disp = mask_aplica & (df['D:CERTSM'] == '') & (df['CodigoParte'] == cod)
         candidatas = df[mask_disp].copy()
         if candidatas.empty:
@@ -212,8 +213,6 @@ def preasignar_codigos_compartidos(df, ce_info):
                 r for r in ce_info[nro_ce].get('renglones', []) if r['codigo'] == cod
             ]
 
-        # FIX 1: filtrar por factura del CE específico
-        # FIX 2: filtrar por ValorFOBTotal de la línea ≈ FOB del CE (discrimina líneas idénticas)
         for nro_ce, renglones in renglones_por_ce.items():
             factura_ce = ce_info[nro_ce].get('factura')
             fob_ce = ce_info[nro_ce]['fob']
@@ -240,7 +239,6 @@ def preasignar_codigos_compartidos(df, ce_info):
                         f"Verificar que el Template tenga esa línea."
                     )
 
-    # Validación: si la pre-asignación dejó a un CE sin poder cerrar su FOB, revertir
     for nro_ce, info in ce_info.items():
         fob_ce = info['fob']
         factura = info.get('factura')
@@ -310,7 +308,6 @@ def asignar_ce(df, ce_info):
         firma_re.setdefault(firma, []).append(nro_ce)
     alertas_dup = [{'ces': v, 'fob': k[1]} for k, v in firma_re.items() if len(v) > 1]
 
-    # PASO 1: pre-asignar códigos compartidos entre CEs (con fix de factura por CE)
     df, avisos_reparto = preasignar_codigos_compartidos(df, ce_info)
 
     resultados = []
@@ -327,7 +324,6 @@ def asignar_ce(df, ce_info):
         pool['_cant'] = pool['Cantidad'].apply(safe_float) if 'Cantidad' in pool.columns else 1.0
         pool['_fob'] = pool['ValorTotalItem'].apply(safe_float)
 
-        # PASO 2: matching renglón-a-línea para códigos no compartidos
         renglones_pendientes = []
         for rg in info.get('renglones', []):
             ya = (
@@ -361,7 +357,6 @@ def asignar_ce(df, ce_info):
             else:
                 renglones_pendientes.append((rg, candidatos_idx))
 
-        # PASO 3: combinatoria solo para renglones con ambigüedad real
         for rg, candidatos_idx in renglones_pendientes:
             if not candidatos_idx:
                 avisos_reparto.append(
@@ -386,12 +381,31 @@ def asignar_ce(df, ce_info):
         resultados.append({'ce': nro_ce, 're': info['re'], 'estado': estado,
                            'fob_ce': fob_ce, 'fob_calc': fob_calc, 'n_items': len(ya_asignadas_idx)})
 
-    if 'V:AUTOLIQCONTRIMP' not in df.columns:
+    # V:MINERIA — SI si tiene CE asignado, vacío si no
+    if 'V:MINERIA' not in df.columns:
         idx_certsm = df.columns.tolist().index('D:CERTSM')
-        df.insert(idx_certsm + 1, 'V:AUTOLIQCONTRIMP', '')
-    df['V:AUTOLIQCONTRIMP'] = df['D:CERTSM'].apply(lambda v: 'SI' if v and str(v).strip() != '' else '')
+        df.insert(idx_certsm + 1, 'V:MINERIA', '')
+    df['V:MINERIA'] = df['D:CERTSM'].apply(lambda v: 'SI' if v and str(v).strip() != '' else '')
 
-    return df, resultados, alertas_dup, avisos_reparto
+    # I:MINERIAOPC — MIN001 o MIN002 según NCM, solo para filas con CE asignado
+    ncm_map = cargar_ncm_mineria()
+    if 'I:MINERIAOPC' not in df.columns:
+        idx_vmin = df.columns.tolist().index('V:MINERIA')
+        df.insert(idx_vmin + 1, 'I:MINERIAOPC', '')
+    alertas_ncm = []
+    if 'PosicionArancelaria' in df.columns:
+        for i, row in df.iterrows():
+            if not row.get('D:CERTSM', ''):
+                continue  # sin CE → vacío
+            ncm = str(row['PosicionArancelaria']).strip()[:10] if pd.notna(row['PosicionArancelaria']) else ''
+            valor = ncm_map.get(ncm, '')
+            df.at[i, 'I:MINERIAOPC'] = valor
+            if not valor:
+                alertas_ncm.append(
+                    f"⚠️ NCM {ncm} (ITEM {row.get('ITEM','?')}) tiene CE asignado pero no figura en el listado Res. 73/26 SM."
+                )
+
+    return df, resultados, alertas_dup, avisos_reparto, alertas_ncm
 
 # ── UI ─────────────────────────────────────────────────────────────────────────
 st.title("📜 Template Unificado con CE")
@@ -447,11 +461,12 @@ if st.button("🔍 ANALIZAR Y ASIGNAR CE", disabled=not (f_unificado and f_pdfs 
                                    'cantidad_por_codigo': res[nro_re]['cantidad_por_codigo'],
                                    'renglones': res[nro_re]['renglones']}
 
-        df_resultado, resultados, alertas_dup, avisos_reparto = asignar_ce(df, ce_info)
+        df_resultado, resultados, alertas_dup, avisos_reparto, alertas_ncm = asignar_ce(df, ce_info)
 
         st.session_state.update({
             'df_resultado': df_resultado, 'resultados': resultados,
             'alertas_dup': alertas_dup, 'avisos_reparto': avisos_reparto,
+            'alertas_ncm': alertas_ncm,
             'fname_original': f_unificado.name,
             'procesado': True,
             'nro_ref': nro_ref
@@ -473,6 +488,13 @@ if st.session_state.get('procesado'):
         st.markdown("### ⚠️ Avisos — reparto por cantidad (códigos compartidos entre CE)")
         for a in avisos_reparto:
             st.markdown(f'<span class="badge-warn">{a}</span>', unsafe_allow_html=True)
+
+    alertas_ncm = st.session_state.get('alertas_ncm', [])
+    if alertas_ncm:
+        st.markdown("### ⚠️ Alertas — NCM sin clasificar en Res. 73/26 SM")
+        for a in alertas_ncm:
+            st.markdown(f'<span class="badge-err">{a}</span>', unsafe_allow_html=True)
+        st.warning("Hay ítems con CE asignado cuya NCM no figura en el listado. Revisá antes de descargar.")
 
     st.markdown("### 📊 Resultado de la asignación")
     for r in resultados:
