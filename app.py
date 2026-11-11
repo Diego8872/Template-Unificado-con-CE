@@ -428,6 +428,8 @@ def asignar_lineas(df, pares, ncm_map):
 
     # salida: columnas nuevas junto a la columna de ítem
     out = df.copy()
+    if 'ITEM_DESPACHO' in out.columns and 'ITEM' not in out.columns:
+        out = out.rename(columns={'ITEM_DESPACHO': 'ITEM'})
     for c in COLS_NUEVAS:
         if c in out.columns:
             out = out.drop(columns=[c])
@@ -529,7 +531,7 @@ def exportar_excel(df, control, avisos_y_alertas):
               a.get('desc_ce', ''), a.get('desc_xls', ''), a['detalle']] for a in avisos_y_alertas]
     if not filas:
         filas = [['', 'Sin avisos', '', '', '', '', '', '', '']]
-    hoja('Avisos', ['Nivel', 'Tipo', 'CE', 'Orden', 'ITEM_DESPACHO', 'Fila Excel',
+    hoja('Avisos', ['Nivel', 'Tipo', 'CE', 'Orden', 'ITEM', 'Fila Excel',
                     'Descripción IF/CE', 'Descripción Excel', 'Detalle'], filas)
     buf = io.BytesIO()
     wb.save(buf)
